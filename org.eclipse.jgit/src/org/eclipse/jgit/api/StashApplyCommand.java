@@ -43,6 +43,9 @@
 package org.eclipse.jgit.api;
 
 import java.util.Set;
+
+import org.eclipse.jgit.lib.Constants;
+import org.eclipse.jgit.lib.ObjectId;
 import org.eclipse.jgit.lib.Repository;
 
 /**
@@ -62,11 +65,14 @@ public class StashApplyCommand extends GitCommand<Set<String>> {
 
 	public Set<String> call() throws Exception {
 		// Get objectID of head stash
-		// ObjectId stashId = repo.resolve(Constants.R_STASH);
+		ObjectId stashId = repo.resolve(Constants.R_STASH);
+		System.out.println("Head ID: " + repo.resolve(Constants.HEAD));
+		System.out.println("Stash ID: " + stashId);
 
 		// merge stash to head
-		// MergeCommand merge = new MergeCommand(repo);
-		// merge.include(stashId);
+		MergeCommand merge = new MergeCommand(repo);
+		MergeResult rc = merge.include(stashId).call();
+		System.out.println("MergeResult: " + rc);
 
 		return null;
 	}

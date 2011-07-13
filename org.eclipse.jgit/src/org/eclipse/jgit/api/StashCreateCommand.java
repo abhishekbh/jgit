@@ -80,7 +80,7 @@ import org.eclipse.jgit.treewalk.FileTreeIterator;
 
 /**
  * Stash the changes in a dirty working directory away
- * 
+ *
  * @see <a href="http://www.kernel.org/pub/software/scm/git/docs/git-stash.html"
  *      >Git documentation about Stash</a>
  */

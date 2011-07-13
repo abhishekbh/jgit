@@ -223,6 +223,7 @@ public class CommitCommand extends GitCommand<RevCommit> {
 
 						ru.setExpectedOldObjectId(headId);
 						Result rc = ru.forceUpdate();
+
 						switch (rc) {
 						case NEW:
 						case FORCED:

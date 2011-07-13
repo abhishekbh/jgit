@@ -63,7 +63,8 @@ public class StashListCommand extends GitCommand<Set<String>> {
 
 	public Set<String> call() throws Exception {
 		// output contents of stash?
-		// System.out.println(repo.resolve("refs/stash"));
+		System.out.println("Stash List:");
+		System.out.println(repo.resolve("refs/stash"));
 		return null;
 	}
 }

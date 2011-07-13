@@ -42,7 +42,11 @@
  */
 package org.eclipse.jgit.api;
 
-import static org.junit.Assert.assertTrue;
+import java.io.BufferedReader;
+import java.io.BufferedWriter;
+import java.io.FileReader;
+import java.io.FileWriter;
+import java.io.IOException;
 
 import org.eclipse.jgit.lib.RepositoryTestCase;
 import org.junit.Before;
@@ -57,32 +61,76 @@ public class StashApplyCommandTest extends RepositoryTestCase {
 		git = new Git(db);
 
 		// create test files
-		writeTrashFile("File1.txt", "committed");
-		writeTrashFile("File2.txt", "staged");
+		writeTrashFile("File1.txt", "original unstashed content\n");
 
-		// commit first file
+		// commit changes
 		git.add().addFilepattern("File1.txt").call();
 		git.commit().setMessage("Test file commit").call();
-
-		git.add().addFilepattern("File2.txt");
 	}
 
 	@Test
 	public void testStash() {
 		try {
-			Status status = git.status().call();
-			assertTrue(status.getUntracked().size() != 0);
+			// edit and output file
+			editFile(git.getRepository().getWorkTree() + "/File1.txt",
+					"stashed content");
+
 			// 1) call stash create command
 			git.stashCreate().call();
-			// 2) verify that file2 is untracked via status command
-			status = git.status().call();
-			assertTrue(status.getUntracked().size() == 0);
-			// 3) verify that file 2 and file 3 are stashed via stash list
-			// command
+			// 2) call stash list
 			git.stashList().call();
-			// 4) call stash apply command
+			// 2.5) edit file again and create commit
+			editFile(git.getRepository().getWorkTree() + "/File1.txt",
+					"edit 2");
+			// 2.6) add and commit change
+			git.add().addFilepattern("File1.txt").call();
+			git.commit().setMessage("second commit").call();
+			// 3) apply stash
 			git.stashApply().call();
+			// 4) verify stash applied by outputting file
+			readFile(git.getRepository().getWorkTree() + "/File1.txt");
 		} catch (Exception e) {
+			e.printStackTrace();
+		}
+	}
+
+	public void readFile(String fileName) {
+		try {
+			FileReader input = new FileReader(fileName);
+			BufferedReader bufRead = new BufferedReader(input);
+
+			String line;
+			int count = 0;
+
+			line = bufRead.readLine();
+			count++;
+
+			while (line != null) {
+				System.out.println("File Contents: " + line);
+				line = bufRead.readLine();
+				count++;
+			}
+
+			bufRead.close();
+		} catch (ArrayIndexOutOfBoundsException e) {
+			System.out.println(e.getStackTrace());
+		} catch (IOException e) {
+			e.printStackTrace();
+		}
+	}
+
+	public void editFile(String fileName, String mssg) {
+		try {
+			FileWriter output = new FileWriter(fileName);
+			BufferedWriter bufWrite = new BufferedWriter(output);
+
+			output.write(mssg);
+
+			bufWrite.close();
+
+		} catch (ArrayIndexOutOfBoundsException e) {
+			System.out.println("Usage: java ReadFile filename\n");
+		} catch (IOException e) {
 			e.printStackTrace();
 		}
 	}

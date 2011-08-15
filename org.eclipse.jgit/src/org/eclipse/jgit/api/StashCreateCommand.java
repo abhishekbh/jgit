@@ -42,41 +42,29 @@
  */
 package org.eclipse.jgit.api;
 
-import static org.eclipse.jgit.lib.Constants.OBJ_BLOB;
-
-import java.util.Arrays;
-import java.util.LinkedList;
+import java.io.File;
+import java.io.IOException;
+import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 
 import org.eclipse.jgit.JGitText;
-import org.eclipse.jgit.api.errors.ConcurrentRefUpdateException;
 import org.eclipse.jgit.api.errors.JGitInternalException;
+import org.eclipse.jgit.api.errors.NoHeadException;
 import org.eclipse.jgit.dircache.DirCache;
-import org.eclipse.jgit.dircache.DirCacheBuilder;
-import org.eclipse.jgit.dircache.DirCacheEntry;
-import org.eclipse.jgit.errors.IncorrectObjectTypeException;
+import org.eclipse.jgit.dircache.DirCacheCheckout;
 import org.eclipse.jgit.lib.AnyObjectId;
 import org.eclipse.jgit.lib.CommitBuilder;
 import org.eclipse.jgit.lib.Constants;
-import org.eclipse.jgit.lib.FileMode;
 import org.eclipse.jgit.lib.ObjectId;
 import org.eclipse.jgit.lib.ObjectInserter;
-import org.eclipse.jgit.lib.ObjectReader;
 import org.eclipse.jgit.lib.PersonIdent;
 import org.eclipse.jgit.lib.RefUpdate;
-import org.eclipse.jgit.lib.RefUpdate.Result;
 import org.eclipse.jgit.lib.Repository;
-import org.eclipse.jgit.merge.MergeMessageFormatter;
-import org.eclipse.jgit.merge.MergeStrategy;
-import org.eclipse.jgit.merge.ResolveMerger;
-import org.eclipse.jgit.merge.ThreeWayMerger;
-import org.eclipse.jgit.merge.ResolveMerger.MergeFailureReason;
 import org.eclipse.jgit.revwalk.RevCommit;
-import org.eclipse.jgit.revwalk.RevObject;
-import org.eclipse.jgit.revwalk.RevTree;
 import org.eclipse.jgit.revwalk.RevWalk;
-import org.eclipse.jgit.treewalk.FileTreeIterator;
+import org.eclipse.jgit.util.FileUtils;
 
 /**
  * Stash the changes in a dirty working directory away
@@ -89,215 +77,137 @@ public class StashCreateCommand extends GitCommand<RevCommit> {
 	 * parents this commit should have. The current HEAD will be in this list
 	 * and also all commits mentioned in .git/MERGE_HEAD
 	 */
-	private List<ObjectId> parents = new LinkedList<ObjectId>();
-
-	private PersonIdent author = new PersonIdent("Abhishek Bhatnagar",
-			"abhatnag@redhat.com");
+	private PersonIdent author = new PersonIdent("Bob Sacamano",
+			"bsacamano@seinfeld.com");
 
 	private PersonIdent committer = new PersonIdent("Test User",
 			"test@redhat.com");
-
-	private MergeStrategy mergeStrategy = MergeStrategy.RESOLVE;
 
 	/**
 	 * @param repo
 	 */
 	protected StashCreateCommand(Repository repo) {
 		super(repo);
+		final Map<String, String> env = cloneEnv();
+		putPersonIdent(env, "AUTHOR", author);
+		putPersonIdent(env, "COMMITTER", committer);
+	}
+
+	private static void putPersonIdent(final Map<String, String> env,
+			final String type, final PersonIdent who) {
+		final String ident = who.toExternalString();
+		final String date = ident.substring(ident.indexOf("> ") + 2);
+		env.put("GIT_" + type + "_NAME", who.getName());
+		env.put("GIT_" + type + "_EMAIL", who.getEmailAddress());
+		env.put("GIT_" + type + "_DATE", date);
+	}
+
+	private RevCommit checkoutCurrentHead(DirCache dc) throws IOException,
+			NoHeadException, JGitInternalException {
+		ObjectId headTree = repo.resolve(Constants.HEAD + "^{tree}");
+
+		System.out.println(author);
+		System.out.println(committer);
+		try {
+			Thread.sleep(10000000);
+		} catch (InterruptedException e) {
+			e.printStackTrace();
+		}
+
+		if (headTree == null)
+			throw new NoHeadException(
+					JGitText.get().cannotRebaseWithoutCurrentHead);
+		// DirCache dc = repo.lockDirCache();
+		try {
+			DirCacheCheckout dco = new DirCacheCheckout(repo, dc, headTree);
+			dco.setFailOnConflict(false);
+			boolean needsDeleteFiles = dco.checkout();
+			if (needsDeleteFiles) {
+				List<String> fileList = dco.getToBeDeleted();
+				for (String filePath : fileList) {
+					File fileToDelete = new File(repo.getWorkTree(), filePath);
+					if (fileToDelete.exists())
+						FileUtils.delete(fileToDelete, FileUtils.RECURSIVE
+								| FileUtils.RETRY);
+				}
+			}
+		} finally {
+			dc.unlock();
+		}
+		RevWalk rw = new RevWalk(repo);
+		RevCommit commit = rw.parseCommit(repo.resolve(Constants.HEAD));
+		rw.release();
+		return commit;
 	}
 
 	public RevCommit call() throws Exception {
-		// create commit of current index
-
-		// determine the current HEAD and the commit it is referring to
-		ObjectId headCommitId = repo.resolve(Constants.HEAD + "^{commit}");
-		System.out.println("Head commit id: " + headCommitId);
-		if (headCommitId == null) {
-			RevCommit previousCommit = new RevWalk(repo)
-					.parseCommit(headCommitId);
-			RevCommit[] p = previousCommit.getParents();
-			for (int i = 0; i < p.length; i++)
-				parents.add(0, p[i].getId());
-		} else {
-			parents.add(0, headCommitId);
-		}
-
 		// lock the index
 		DirCache index = repo.lockDirCache();
+		// generic object inserter for use here
+		ObjectInserter obi = repo.newObjectInserter();
 
-		try {
-			ObjectInserter odi = repo.newObjectInserter();
-			try {
-				ObjectId indexTreeId = index.writeTree(odi);
-				System.out.println("indexTreeId: " + indexTreeId);
+		// determine the current HEAD and the commit it is referring to
+		// this will act as the first parent of our stash object
+		ObjectId headCommitId = repo.resolve(Constants.HEAD + "^{commit}");
+		// create a new commit object which will act as the second parent of the
+		// stash object
+		// second commit object:
+		// tree: tree stored inside headCommitId
+		// parent: headCommitId
+		CommitBuilder secondParent = new CommitBuilder();
+		secondParent.setCommitter(committer);
+		secondParent.setAuthor(author);
+		secondParent.setMessage("WIP on master: 1e41dc first commit");
+		secondParent.setParentId(headCommitId);
+		secondParent.setTreeId(index.writeTree(repo.newObjectInserter()));
+		// save this commit
+		ObjectId secondParentCommitId = obi.insert(secondParent);
+		obi.flush();
 
-				// experiment
-				DirCacheBuilder b = index.builder();
-				DirCacheEntry ent = new DirCacheEntry("a");
-				ent.setFileMode(FileMode.REGULAR_FILE);
-				ent.setObjectId(new ObjectInserter.Formatter().idFor(OBJ_BLOB,
-						Constants.encode("a")));
-				b.add(ent);
-				b.finish();
+		// list of the two parents
+		List<AnyObjectId> stashParentSet = new ArrayList<AnyObjectId>();
+		stashParentSet.add(headCommitId);
+		stashParentSet.add(secondParentCommitId);
 
-				// create a commit object, populate it and write it
-				CommitBuilder newCommit = new CommitBuilder();
-				newCommit.setCommitter(committer);
-				newCommit.setAuthor(author);
-				newCommit.setMessage("index on master: 1e41dc first commit");
-				newCommit.setParentIds(parents);
-				newCommit.setTreeId(indexTreeId);
+		// now that we have the two parents, create stash object which is
+		// another commit
+		CommitBuilder stashObject = new CommitBuilder();
+		stashObject.setCommitter(committer);
+		stashObject.setAuthor(author);
+		stashObject.setMessage("WIP on master: 1e41dc first commit");
+		stashObject.setParentIds(stashParentSet);
+		stashObject.setTreeId(index.writeTree(repo.newObjectInserter()));
+		// save stash object
+		ObjectId stashHead = obi.insert(stashObject);
+		obi.flush();
 
-				// insert commit
-				ObjectId newCommitId = odi.insert(newCommit);
-				odi.flush();
-				System.out.println("first commit made");
+		// stash object created
+		// up next, create a reference for it
+		RefUpdate ru = repo.updateRef(Constants.R_STASH);
+		ru.setNewObjectId(stashHead);
+		// this is going to be ObjectId.zeroId() if it's the
+		// first
+		// stash
+		// if not, grab the id from what the ref currently
+		// points to
+		ru.setExpectedOldObjectId(ObjectId.zeroId());
+		ru.forceUpdate();
 
-				// temp head and src commits
-				System.out.println("Commit 1: " + headCommitId);
-				System.out.println("Commit 2: " + newCommitId);
-
-				RevWalk revWalk = new RevWalk(repo);
-				try {
-					RevCommit revCommit = revWalk.parseCommit(headCommitId);
-
-					// ////////////////////////////////////////////////////////////////////////////////////
-					// artificial merge
-					boolean noProblems = false;
-					// RevCommit newHead = null;
-					Map<String, MergeFailureReason> failingPaths = null;
-					List<String> unmergedPaths = null;
-
-					// begin
-					repo.writeMergeHeads(Arrays.asList(headCommitId,
-							newCommitId));
-					ThreeWayMerger merger = (ThreeWayMerger) mergeStrategy
-							.newMerger(repo);
-
-					// do the actual merging
-					if (merger instanceof ResolveMerger) {
-						ResolveMerger resolveMerger = (ResolveMerger) merger;
-						resolveMerger.setCommitNames(new String[] { "BASE",
-								"HEAD", "NEW" }); // come back here
-						resolveMerger
-								.setWorkingTreeIterator(new FileTreeIterator(
-										repo));
-						// Find two commits, that I'm merging
-						// noProblems = merger.merge(headCommitId, newCommitId);
-						// ///////////////////////////////////////////////////
-						RevObject[] sourceObjects = null;
-						ObjectReader reader = repo.newObjectReader();
-						RevWalk walk = new RevWalk(reader);
-						RevCommit[] sourceCommits = null;
-						RevTree[] sourceTrees = null;
-						AnyObjectId[] tips = new AnyObjectId[2];
-						tips[0] = headCommitId;
-						tips[1] = newCommitId;
-
-						sourceObjects = new RevObject[tips.length];
-						for (int i = 0; i < tips.length; i++)
-							sourceObjects[i] = walk.parseAny(tips[i]);
-
-						sourceCommits = new RevCommit[sourceObjects.length];
-						for (int i = 0; i < sourceObjects.length; i++) {
-							try {
-								sourceCommits[i] = walk
-										.parseCommit(sourceObjects[i]);
-							} catch (IncorrectObjectTypeException err) {
-								sourceCommits[i] = null;
-							}
-						}
-
-						sourceTrees = new RevTree[sourceObjects.length];
-						for (int i = 0; i < sourceObjects.length; i++)
-							sourceTrees[i] = walk.parseTree(sourceObjects[i]);
-						// ///////////////////////////////////////////////////
-						failingPaths = resolveMerger.getFailingPaths();
-						unmergedPaths = resolveMerger.getUnmergedPaths();
-						noProblems = true;
-					} else {
-						noProblems = merger.merge(headCommitId, newCommitId);
-					}
-
-					// check for problems
-					if (noProblems) {
-						System.out.println("NO PROBLEMS");
-						/*
-						 * DirCacheCheckout dco = new DirCacheCheckout(repo,
-						 * ((RevCommit) headCommitId).getTree(), // fishy
-						 * repo.lockDirCache(), merger.getResultTreeId());
-						 * dco.setFailOnConflict(true); dco.checkout();
-						 */
-						// convert to manual commit
-						/*
-						 * newHead = new Git(getRepository()).commit()
-						 * .setAuthor(author).setCommitter(committer)
-						 * .setMessage("Sup Dawg").call();
-						 */
-						// create a commit object, populate it and write it
-						CommitBuilder latestCommit = new CommitBuilder();
-						latestCommit.setCommitter(committer);
-						latestCommit.setAuthor(author);
-						latestCommit
-								.setMessage("index on master: e4783e2 first commit");
-						latestCommit.setParentIds(parents);
-						latestCommit.setTreeId(indexTreeId);
-
-						ObjectId newHead = odi.insert(newCommit);
-						odi.flush();
-
-						RefUpdate ru = repo.updateRef(Constants.R_STASH);
-						ru.setNewObjectId(newHead);
-
-						// this is going to be ObjectId.zeroId() if it's the
-						// first
-						// stash
-						// if not, grab the id from what the ref currently
-						// points to
-						ru.setExpectedOldObjectId(ObjectId.zeroId());
-						Result rc = ru.forceUpdate();
-
-						switch (rc) {
-						case FAST_FORWARD: {
-							setCallable(false);
-							return revCommit;
-						}
-						case NEW: {
-							setCallable(false);
-							return revCommit;
-						}
-						case LOCK_FAILURE:
-							throw new ConcurrentRefUpdateException(
-									JGitText.get().couldNotLockHEAD,
-									ru.getRef(), rc);
-						default:
-							System.out.println("ERROR: " + rc);
-							throw new JGitInternalException(
-									"Something went wrong");
-						}
-					} else {
-						System.out.println("PROBLEMS: " + !noProblems);
-						if (failingPaths != null) {
-							System.out.println("Not good, something happened");
-							repo.writeMergeCommitMsg(null);
-							repo.writeMergeHeads(null);
-						} else {
-							String mergeMessageWithConflicts = new MergeMessageFormatter()
-									.formatWithConflicts(
-											"index on master: e4783e2 first commit",
-											unmergedPaths);
-							repo.writeMergeCommitMsg(mergeMessageWithConflicts);
-						}
-					}
-				} finally {
-					revWalk.release();
-				}
-			} finally {
-				odi.release();
-			}
-		} finally {
-			index.unlock();
-		}
+		// up next create a merge of the current head with the current workspace
+		// ie checkout from commit at head
+		checkoutCurrentHead(index);
+		// RevWalk revWalk = new RevWalk(repo);
+		/*
+		 * try { // get commit at head RevCommit commitAtHead =
+		 * revWalk.parseCommit(headCommitId); // merge this with workspace
+		 * repo.writeMergeHeads(Arrays.asList(commitAtHead, headCommitId));
+		 * mergeStrategy.newMerger(repo); } catch (Exception e) {
+		 * e.printStackTrace(); }
+		 */
 		return null;
+	}
+
+	private static HashMap<String, String> cloneEnv() {
+		return new HashMap<String, String>(System.getenv());
 	}
 }
